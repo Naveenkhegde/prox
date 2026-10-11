@@ -1,0 +1,20 @@
+[Unit]
+Description=Prox - Simple Local Reverse Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=baby
+Group=baby
+WorkingDirectory=/home/baby/prox
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /home/baby/prox/server.js
+Restart=always
+RestartSec=3
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

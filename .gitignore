@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build artifacts and packages
+dist/
+*.deb
+*.tar.gz
+
+# Local user configurations
+routes.json
+
+# Logs & temp files
+*.log
+*.tmp*
+.DS_Store
+
+# Sensitive files
+.env
+.github_cred

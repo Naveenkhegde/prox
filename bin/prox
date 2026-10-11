@@ -1,0 +1,355 @@
+#!/usr/bin/env node
+'use strict';
+
+const path = require('path');
+const cp = require('child_process');
+const config = require('../lib/config');
+const hosts = require('../lib/hosts');
+const health = require('../lib/health');
+const proxy = require('../lib/proxy');
+
+// ANSI colors
+const colors = {
+  reset: '\x1b[0m',
+  bold: '\x1b[1m',
+  dim: '\x1b[2m',
+  green: '\x1b[32m',
+  red: '\x1b[31m',
+  yellow: '\x1b[33m',
+  blue: '\x1b[34m',
+  magenta: '\x1b[35m',
+  cyan: '\x1b[36m'
+};
+
+function printHelp() {
+  console.log(`
+${colors.bold}${colors.cyan}PROX${colors.reset} - Simple Local Reverse Proxy for Developers
+
+${colors.bold}USAGE:${colors.reset}
+  prox <command> [options]
+
+${colors.bold}COMMANDS:${colors.reset}
+  ${colors.green}add${colors.reset} <domain> <port> [ip]      Map a domain to an IP and port (default IP: 127.0.0.1)
+  ${colors.green}remove, rm${colors.reset} <domain>           Remove a mapped domain
+  ${colors.green}list, ls${colors.reset}                     List all mapped routes with live health status
+  ${colors.green}start${colors.reset}                        Start the background reverse proxy service
+  ${colors.green}stop${colors.reset}                         Stop the background reverse proxy service
+  ${colors.green}restart${colors.reset}                      Restart the reverse proxy service
+  ${colors.green}status${colors.reset}                       Check if the proxy server is running
+  ${colors.green}logs${colors.reset}                         View proxy service logs
+  ${colors.green}sync-hosts${colors.reset}                   Sync all mapped domains into /etc/hosts
+  ${colors.green}open${colors.reset} [domain]                 Open domain (or dashboard) in your default browser
+  ${colors.green}run${colors.reset}                          Run the proxy server in the foreground
+
+${colors.bold}OPTIONS:${colors.reset}
+  -d, --desc <text>              Description for the application
+  --no-hosts                     Do not update /etc/hosts automatically
+  -p, --port <port>              Listening port for reverse proxy (default: 80)
+  -h, --help                     Show this help message
+
+${colors.bold}EXAMPLES:${colors.reset}
+  ${colors.dim}# Map app.local to port 3000 on 127.0.0.1${colors.reset}
+  prox add app.local 3000
+
+  ${colors.dim}# Map api.local with a description${colors.reset}
+  prox add api.local 5000 -d "Node backend API"
+
+  ${colors.dim}# Map a remote/custom IP and port${colors.reset}
+  prox add nas.local 8080 192.168.1.150
+
+  ${colors.dim}# List all apps and their live health status${colors.reset}
+  prox list
+
+  ${colors.dim}# Open the app in your browser${colors.reset}
+  prox open app.local
+`);
+}
+
+async function handleAdd(args) {
+  let domain = null;
+  let port = null;
+  let ip = '127.0.0.1';
+  let desc = '';
+  let syncHosts = true;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--no-hosts') {
+      syncHosts = false;
+    } else if (arg === '-d' || arg === '--desc') {
+      desc = args[++i] || '';
+    } else if (!domain) {
+      domain = arg;
+    } else if (!port) {
+      // Check if user wrote ip:port e.g. "192.168.1.50:8080" or just port
+      if (arg.includes(':')) {
+        const parts = arg.split(':');
+        ip = parts[0];
+        port = parseInt(parts[1], 10);
+      } else {
+        port = parseInt(arg, 10);
+      }
+    } else if (ip === '127.0.0.1') {
+      ip = arg;
+    }
+  }
+
+  if (!domain || !port) {
+    console.error(`${colors.red}Error:${colors.reset} Missing required arguments.`);
+    console.error(`Usage: prox add <domain> <port> [ip]`);
+    process.exit(1);
+  }
+
+  try {
+    const route = config.addRoute({ domain, port, ip, description: desc });
+    console.log(`${colors.green}✔ Route added:${colors.reset} ${colors.bold}${route.domain}${colors.reset} → ${colors.cyan}${route.ip}:${route.port}${colors.reset}`);
+
+    if (syncHosts) {
+      try {
+        hosts.addDomain(route.domain);
+        console.log(`${colors.green}✔ /etc/hosts updated:${colors.reset} ${route.domain} mapped to 127.0.0.1`);
+      } catch (hErr) {
+        console.warn(`${colors.yellow}⚠ Could not update /etc/hosts automatically:${colors.reset} ${hErr.message}`);
+        console.warn(`You can add it manually: echo "127.0.0.1 ${route.domain}" | sudo tee -a /etc/hosts`);
+      }
+    }
+
+    const isOnline = await health.checkTargetHealth(route.ip, route.port);
+    if (isOnline) {
+      console.log(`${colors.green}✔ Target application is ONLINE${colors.reset} on ${route.ip}:${route.port}`);
+    } else {
+      console.log(`${colors.dim}ℹ Target application is currently offline or not started yet on ${route.ip}:${route.port}${colors.reset}`);
+    }
+
+    console.log(`\nOpen in browser: ${colors.bold}${colors.cyan}http://${route.domain}${colors.reset}`);
+  } catch (err) {
+    console.error(`${colors.red}Error:${colors.reset} ${err.message}`);
+    process.exit(1);
+  }
+}
+
+async function handleRemove(args) {
+  const domain = args[0];
+  if (!domain) {
+    console.error(`${colors.red}Error:${colors.reset} Please specify the domain to remove.`);
+    console.error(`Usage: prox remove <domain>`);
+    process.exit(1);
+  }
+
+  const removed = config.removeRoute(domain);
+  if (!removed) {
+    console.log(`${colors.yellow}No mapping found for "${domain}".${colors.reset}`);
+    return;
+  }
+
+  console.log(`${colors.green}✔ Removed route for ${colors.bold}${domain}${colors.reset}`);
+  try {
+    hosts.removeDomain(domain);
+    console.log(`${colors.green}✔ Cleaned from /etc/hosts${colors.reset}`);
+  } catch (hErr) {
+    console.warn(`${colors.yellow}⚠ Could not clean /etc/hosts automatically:${colors.reset} ${hErr.message}`);
+  }
+}
+
+async function handleList() {
+  const cfg = config.loadConfig();
+  if (cfg.routes.length === 0) {
+    console.log(`\nNo applications configured yet.`);
+    console.log(`Run ${colors.cyan}prox add <domain> <port>${colors.reset} or open ${colors.cyan}http://localhost${colors.reset}\n`);
+    return;
+  }
+
+  console.log(`\nChecking backend health for ${cfg.routes.length} application(s)...\n`);
+  const routesWithHealth = await health.checkAllRoutesHealth(cfg.routes);
+
+  // Table formatting
+  const colDomain = Math.max(12, ...routesWithHealth.map(r => r.domain.length));
+  const colTarget = Math.max(15, ...routesWithHealth.map(r => `${r.ip}:${r.port}`.length));
+  const colDesc = Math.max(12, ...routesWithHealth.map(r => (r.description || '').length));
+
+  const pad = (str, len) => (str + ' '.repeat(Math.max(0, len - str.length)));
+
+  console.log(
+    colors.bold +
+    pad('DOMAIN', colDomain) + '  ' +
+    pad('TARGET', colTarget) + '  ' +
+    pad('STATUS', 10) + '  ' +
+    pad('HOSTS', 8) + '  ' +
+    'DESCRIPTION' +
+    colors.reset
+  );
+  console.log('-'.repeat(colDomain + colTarget + 10 + 8 + colDesc + 8));
+
+  for (const r of routesWithHealth) {
+    const statusText = r.online
+      ? `${colors.green}ONLINE${colors.reset} `
+      : `${colors.red}OFFLINE${colors.reset}`;
+
+    const hostsText = hosts.isDomainResolvingLocally(r.domain)
+      ? `${colors.green}✔ Yes${colors.reset}`
+      : `${colors.yellow}✖ No${colors.reset} `;
+
+    console.log(
+      colors.cyan + pad(r.domain, colDomain) + colors.reset + '  ' +
+      pad(`${r.ip}:${r.port}`, colTarget) + '  ' +
+      statusText + '    ' +
+      hostsText + '   ' +
+      colors.dim + (r.description || '-') + colors.reset
+    );
+  }
+  console.log('');
+}
+
+function handleSyncHosts() {
+  const cfg = config.loadConfig();
+  const domains = cfg.routes.map(r => r.domain);
+  try {
+    hosts.syncHosts(domains);
+    console.log(`${colors.green}✔ /etc/hosts synced successfully for ${domains.length} domain(s).${colors.reset}`);
+  } catch (err) {
+    console.error(`${colors.red}Error syncing /etc/hosts:${colors.reset} ${err.message}`);
+    process.exit(1);
+  }
+}
+
+function isServiceActive() {
+  try {
+    const out = cp.execSync('systemctl is-active prox 2>/dev/null', { encoding: 'utf8' }).trim();
+    return out === 'active';
+  } catch {
+    return false;
+  }
+}
+
+async function isPortListening(port = 80) {
+  return await health.checkTargetHealth('127.0.0.1', port, 300);
+}
+
+async function handleStatus() {
+  const cfg = config.loadConfig();
+  const port = cfg.port || 80;
+  const isListening = await isPortListening(port);
+  const serviceActive = isServiceActive();
+
+  console.log(`\n${colors.bold}PROX Status:${colors.reset}`);
+  console.log(`  Listening Port:  ${port}`);
+  console.log(`  Proxy Server:    ${isListening ? colors.green + 'RUNNING (Accepting Traffic)' + colors.reset : colors.red + 'STOPPED' + colors.reset}`);
+  console.log(`  Systemd Service: ${serviceActive ? colors.green + 'ACTIVE' + colors.reset : colors.yellow + 'INACTIVE' + colors.reset}`);
+  console.log(`  Active Routes:   ${cfg.routes.length}`);
+  console.log(`  Web Dashboard:   http://localhost${port === 80 ? '' : ':' + port}\n`);
+}
+
+function handleStart() {
+  console.log('Starting Prox service...');
+  try {
+    cp.execSync('sudo systemctl start prox', { stdio: 'inherit' });
+    console.log(`${colors.green}✔ Prox service started.${colors.reset}`);
+  } catch (err) {
+    console.warn(`${colors.yellow}Systemd service could not be started directly, attempting daemon start...${colors.reset}`);
+    const scriptPath = path.join(__dirname, '..', 'server.js');
+    cp.spawn(process.execPath, [scriptPath], {
+      detached: true,
+      stdio: 'ignore'
+    }).unref();
+    console.log(`${colors.green}✔ Prox process started in background.${colors.reset}`);
+  }
+}
+
+function handleStop() {
+  console.log('Stopping Prox service...');
+  try {
+    cp.execSync('sudo systemctl stop prox', { stdio: 'inherit' });
+    console.log(`${colors.green}✔ Prox service stopped.${colors.reset}`);
+  } catch {
+    cp.execSync('pkill -f "node.*prox.*server.js" || true');
+    console.log(`${colors.green}✔ Prox processes stopped.${colors.reset}`);
+  }
+}
+
+function handleRestart() {
+  console.log('Restarting Prox service...');
+  try {
+    cp.execSync('sudo systemctl restart prox', { stdio: 'inherit' });
+    console.log(`${colors.green}✔ Prox service restarted.${colors.reset}`);
+  } catch {
+    handleStop();
+    handleStart();
+  }
+}
+
+function handleLogs() {
+  try {
+    cp.execSync('journalctl -u prox -f -n 50', { stdio: 'inherit' });
+  } catch {
+    console.log('Unable to read journalctl logs.');
+  }
+}
+
+function handleOpen(domain) {
+  const target = domain ? `http://${domain}` : 'http://localhost';
+  console.log(`Opening ${target} in your browser...`);
+  try {
+    cp.execSync(`xdg-open "${target}" 2>/dev/null || sensible-browser "${target}" 2>/dev/null &`);
+  } catch {
+    console.log(`Please visit ${target} in your browser.`);
+  }
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const cmd = args[0] || 'list';
+
+  switch (cmd) {
+    case 'add':
+      await handleAdd(args.slice(1));
+      break;
+    case 'rm':
+    case 'remove':
+    case 'delete':
+      await handleRemove(args.slice(1));
+      break;
+    case 'ls':
+    case 'list':
+      await handleList();
+      break;
+    case 'sync-hosts':
+      handleSyncHosts();
+      break;
+    case 'start':
+      handleStart();
+      break;
+    case 'stop':
+      handleStop();
+      break;
+    case 'restart':
+      handleRestart();
+      break;
+    case 'status':
+      await handleStatus();
+      break;
+    case 'logs':
+      handleLogs();
+      break;
+    case 'open':
+      handleOpen(args[1]);
+      break;
+    case 'run':
+      console.log('Running Prox in foreground mode. Press Ctrl+C to stop.');
+      await proxy.startServer();
+      break;
+    case '-h':
+    case '--help':
+    case 'help':
+      printHelp();
+      break;
+    default:
+      console.error(`Unknown command: "${cmd}"`);
+      printHelp();
+      process.exit(1);
+  }
+}
+
+main().catch(err => {
+  console.error(`${colors.red}Unexpected error:${colors.reset}`, err);
+  process.exit(1);
+});
