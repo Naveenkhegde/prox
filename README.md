@@ -25,13 +25,16 @@
 
 ### Option 1: Installing via `.deb` Package (Recommended for Debian / Ubuntu / Kali)
 
-A pre-built Debian package is located in `dist/prox_1.0.0_all.deb`.
+Download the pre-built `.deb` package directly from [GitHub Releases](https://github.com/Naveenkhegde/prox/releases/latest) or use `dist/prox_1.0.0_all.deb`:
 
 ```bash
-# 1. Install the .deb package
-sudo dpkg -i dist/prox_1.0.0_all.deb
+# 1. Download the Debian package:
+wget https://github.com/Naveenkhegde/prox/releases/download/v1.0.0/prox_1.0.0_all.deb
 
-# 2. If any dependencies are missing:
+# 2. Install the package:
+sudo dpkg -i prox_1.0.0_all.deb
+
+# 3. If any dependencies are missing:
 sudo apt-get install -f
 ```
 
